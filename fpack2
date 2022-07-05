@@ -1,0 +1,134 @@
+#!/bin/env python3
+
+# fpack2
+# 
+# Copyright (c) 2022 Matthew T. Bucknall
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+import binascii
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import struct
+import sys
+
+from Crypto.Cipher import AES
+
+
+def gen_keys(key_file_path):
+    # generate 128-bit AES key
+    aes_key = bytes.hex(secrets.token_bytes(16))
+
+    # generate HMAC-SHA256 key
+    signature = bytes.hex(secrets.token_bytes(32))
+
+    # save keys to JSON file
+    with open(os.open(key_file_path, os.O_CREAT | os.O_WRONLY, 0o600), 'w') as key_file:
+        json.dump({'aes' : aes_key, 'hmac' : signature}, key_file)
+        key_file.write('\n')
+
+
+def pack_dir(key_file_path, fpk_file_path, input_dir_path):
+    # open and parse previously generated key file
+    with open(key_file_path) as key_file:
+        key_json = json.load(key_file)
+    
+    # get 128-bit AES key from JSON
+    aes_key = bytes.fromhex(key_json['aes'])
+
+    # get HMAC-SHA256 key from JSON
+    hmac_key = bytes.fromhex(key_json['hmac'])
+
+    # create array to store fpk payload in
+    payload = bytearray()
+
+    # recursively walk input directory and include content of each encountered file in payload
+    for subdir, dirs, files in os.walk(input_dir_path):
+        for file in files:
+            # get file path
+            path = os.path.join(subdir, file)
+
+            # strip root directory name from path and UTF-8 encode whatever remains
+            encoded_path = os.path.relpath(path, input_dir_path).encode('utf-8')
+
+            # get file stats and append header, containing encoded path and file size, to payload
+            payload.extend(struct.pack('<H', len(encoded_path)))
+            payload.extend(encoded_path)
+            payload.extend(struct.pack('<I', os.stat(path).st_size))
+
+            # append file content to payload
+            with open(path, 'rb') as input_file:
+                payload.extend(input_file.read())
+    
+    # pad payload to next 16 byte (128-bit) boundary with random data 
+    payload.extend(secrets.token_bytes(0x10 - (len(payload) & 0xF)))
+
+    # get HMAC-SHA256 signature for payload
+    signature = hmac.new(hmac_key, payload, hashlib.sha256).digest()
+
+    # generate inital vector and create 128-bit AES-CBC cipher
+    iv = secrets.token_bytes(16)
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+
+    # create output fpk file
+    with open(fpk_file_path, 'wb') as out_file:
+        # write fpk magic number and version fields
+        out_file.write(b'FPK\x01')
+
+        # write initial vector
+        out_file.write(iv)
+
+        # write encrypted signature and payload
+        out_file.write(cipher.encrypt(signature + payload))
+
+
+def print_usage():
+    print(
+        "Usage: {0} <key-file> <out-file> <in-dir>\n"
+        "or:    {0} generate-keys <key-file>\n\n"
+        "  <key-file>    Key file path.\n"
+        "  <out-file>    Output file path.\n"
+        "  <in-dir>      Input directory path."
+        .format(os.path.basename(__file__))
+    )
+
+
+def main(args=None):
+    if args is None:
+        args = sys.argv
+    
+    n_args = len(args)
+
+    if n_args < 2:
+        print_usage()        
+    elif args[1] == 'generate-keys':
+        if n_args < 3:
+            raise RuntimeError('No key file specified')
+        gen_keys(args[2])
+    elif n_args >= 4:
+        pack_dir(args[1], args[2], args[3])
+    else:
+        print_usage()
+    sys.exit(os.EX_OK)
+
+if __name__ == "__main__":
+    main()
