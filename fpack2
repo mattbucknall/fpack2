@@ -70,7 +70,18 @@ def pack_dir(key_file_path, fpk_file_path, input_dir_path):
             # strip root directory name from path and UTF-8 encode whatever remains
             encoded_path = os.path.relpath(path, input_dir_path).encode('utf-8')
 
+            # cannot pack files with paths longer than 65535 bytes
+            if len(encoded_path) > 65535:
+                raise RuntimeError('File path \'{0}\' too long'.format(encoded_path.decode('utf-8')))
+
             # get file stats and append header, containing encoded path and file size, to payload
+            file_size = os.stat(path).st_size
+
+            # can only pack files no larger than (4GB - 1)
+            if file_size > 0xFFFFFFFF:
+                raise RuntimeError('File \'{0}\' too large'.format(encoded_path.decode('utf-8')))
+
+            # append file header to payload
             payload.extend(struct.pack('<H', len(encoded_path)))
             payload.extend(encoded_path)
             payload.extend(struct.pack('<I', os.stat(path).st_size))
@@ -79,8 +90,9 @@ def pack_dir(key_file_path, fpk_file_path, input_dir_path):
             with open(path, 'rb') as input_file:
                 payload.extend(input_file.read())
     
-    # pad payload to next 16 byte (128-bit) boundary with random data 
-    payload.extend(secrets.token_bytes(0x10 - (len(payload) & 0xF)))
+            # pad payload to next 16 byte (128-bit) boundary with random data 
+            payload_len = len(payload)
+            payload.extend(secrets.token_bytes(((payload_len + 15) & -16) - payload_len))
 
     # get HMAC-SHA256 signature for payload
     signature = hmac.new(hmac_key, payload, hashlib.sha256).digest()
@@ -106,7 +118,7 @@ def print_usage():
         "Usage: {0} <key-file> <out-file> <in-dir>\n"
         "or:    {0} generate-keys <key-file>\n\n"
         "  <key-file>    Key file path.\n"
-        "  <out-file>    Output file path.\n"
+        "  <out-file>    Output FPK file path.\n"
         "  <in-dir>      Input directory path."
         .format(os.path.basename(__file__))
     )
@@ -130,5 +142,6 @@ def main(args=None):
         print_usage()
     sys.exit(os.EX_OK)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()

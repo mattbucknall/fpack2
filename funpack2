@@ -1,0 +1,121 @@
+#!/bin/env python3
+
+# funpack2
+# 
+# Copyright (c) 2022 Matthew T. Bucknall
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+import binascii
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import struct
+import sys
+
+from Crypto.Cipher import AES
+
+
+def unpack_dir(key_file_path, fpk_file_path, output_dir_path):
+    # open parse parse key file
+    # open and parse previously generated key file
+    with open(key_file_path) as key_file:
+        key_json = json.load(key_file)
+    
+    # get 128-bit AES key from JSON
+    aes_key = bytes.fromhex(key_json['aes'])
+
+    # get HMAC-SHA256 key from JSON
+    hmac_key = bytes.fromhex(key_json['hmac'])
+
+    # open fpk file and unpack contents
+    with open(fpk_file_path, 'rb') as fpk_file:
+        # check fpk magic number and version fields
+        if fpk_file.read(4) != b'FPK\x01':
+            raise RuntimeError('Input is not a recognised FPK file')
+        
+        # read initial vector
+        iv = fpk_file.read(16)
+
+        # create cipher
+        cipher = AES.new(aes_key, AES.MODE_CBC, iv)
+
+        # unencrypt signature and payload
+        payload = cipher.decrypt(fpk_file.read())
+        
+        # validate signature
+        if payload[:32] != hmac.new(hmac_key, payload[32:], hashlib.sha256).digest():
+            raise RuntimeError('FPK file signature mismatch')
+        
+        # create output directory if it does not already exist
+        if not os.path.exists(output_dir_path):
+            os.makedirs(output_dir_path)
+        
+        # set cursor to first file record in payload
+        payload_i = 32
+        payload_e = len(payload)
+
+        # iterate through file records and unpack files
+        while payload_i < payload_e:
+            # get file path
+            path_len = struct.unpack('<H', payload[payload_i:payload_i + 2])[0]
+            payload_i += 2
+            file_path = payload[payload_i:payload_i + path_len].decode('UTF-8')
+            payload_i += path_len
+
+            # get file size
+            file_size = struct.unpack('<I', payload[payload_i:payload_i + 4])[0]
+            payload_i += 4
+
+            # unpack file
+            with open(os.path.join(output_dir_path, file_path), 'wb') as output_file:
+                output_file.write(payload[payload_i:payload_i + file_size])
+            
+            # move cursor to next file record or end of file, skipping any padding bytes
+            payload_i += file_size
+            payload_i = (payload_i + 15) & -16
+
+
+def print_usage():
+    print(
+        "Usage: {0} <key-file> <fpk-file> <out-dir>\n\n"
+        "  <key-file>    Key file path.\n"
+        "  <fpk-file>    Input FPK file path.\n"
+        "  <out-dir>     Output directory path.\n"
+        .format(os.path.basename(__file__))
+    )
+
+
+def main(args=None):
+    if args is None:
+        args = sys.argv
+    
+    n_args = len(args)
+
+    if n_args < 4:
+        print_usage()
+    else:
+        unpack_dir(args[1], args[2], args[3])
+    sys.exit(os.EX_OK)
+
+
+if __name__ == '__main__':
+    main()
